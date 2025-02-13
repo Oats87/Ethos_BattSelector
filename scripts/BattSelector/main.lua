@@ -1,35 +1,26 @@
 -- Lua Battery Selector and Alarm widget
 -- BattSelect + ETHOS LUA configuration
 
--- Known Issues:
--- 1. If you change models to another model with BattSelector, the Remaining Sensor will not function.
--- 2. If you change models to another model with BattSelector, the matchingBatteries list (and therefore widget choiceField) will not update. 
-
--- Restarting the radio makes 1 and 2 work again, but I'd like to figure out *why* it happens and fix it properly at some point.
-
 -- Set to true to enable debug output for each function as needed
 local useDebug = {
-    fillFavoritesPanel = false,
-    fillImagePanel = false,
-    fillBatteryPanel = false,
-    fillPrefsPanel = false,
-    doBatteryVoltageCheck = false,
-    updateRemainingSensor = false,
-    getmAh = false,
-    create = false,
-    build = false,
-    paint = false,
-    wakeup = false,
-    configure = false
+    fillFavoritesPanel = true,
+    fillImagePanel = true,
+    fillBatteryPanel = true,
+    fillPrefsPanel = true,
+    doBatteryVoltageCheck = true,
+    updateRemainingSensor = true,
+    getmAh = true,
+    create = true,
+    build = true,
+    paint = true,
+    wakeup = true,
+    configure = true
 }
 
 -- Get Radio Version to determine field size
 local radio = system.getVersion()
 
--- Favorites Panel in Configure
-local function fillFavoritesPanel(widget)
-    widget.favoritesPanel:clear()
-    -- Create list of Unique IDs from on all Batteries' IDs
+local function buildUniqueIds(widget)
     widget.uniqueIDs = {}
     local seen = {}
     for i = 1, #widget.Batteries do
@@ -39,6 +30,13 @@ local function fillFavoritesPanel(widget)
             table.insert(widget.uniqueIDs, id)
         end
     end
+end
+
+-- Favorites Panel in Configure
+local function fillFavoritesPanel(widget)
+    widget.favoritesPanel:clear()
+    -- Create list of Unique IDs from on all Batteries' IDs
+    buildUniqueIds(widget)
 
     -- List out available unique Model IDs in the Favorites panel
     for i, id in ipairs(widget.uniqueIDs) do
@@ -77,7 +75,7 @@ local function fillImagePanel(widget)
     local line = widget.imagePanel:addLine("Default Image")
     local field = form.addFileField(line, nil, "/bitmaps/models", "image+ext", function() return widget.Images.Default or "" end, function(newValue) widget.Images.Default = newValue end)
 
-    if debug then print("Debug(fillImagePanel):" .. "Default Image: " .. widget.Images.Default) end
+    if debug and widget.Images.Default then print("Debug(fillImagePanel):" .. "Default Image: " .. widget.Images.Default) end
 
     -- List out available Model IDs in the Favorites panel
     for i, id in ipairs(widget.uniqueIDs) do
@@ -384,7 +382,6 @@ end
 -- This function is called when the widget is first created
 local function create()
     local widget = {
-        batteries = nil,
         useCapacity = nil,
         percentSensor = nil,
         mahSensor = nil,
@@ -411,7 +408,7 @@ local function create()
         fieldWidth = nil,
         
         numBatts = 0,
-        Batteries = nil,
+        Batteries = {},
         uniqueIDs = {},
         Images = {},
         
@@ -427,11 +424,13 @@ local function create()
         minChargedCellVoltage = nil,
         doHaptic = nil,
         hapticPattern = nil,
+        ready = false,
     }
     return widget
 end
 
 local function build(widget)
+    print("Performing Build")
     local debug = useDebug.build
 
     local w, h = lcd.getWindowSize()
@@ -513,6 +512,9 @@ local function build(widget)
 end
 
 local function wakeup(widget)
+    if not widget.ready then -- early return if the widget isn't ready yet, as it needs to be populated
+        return
+    end
     local debug = useDebug.wakeup
 
     -- Get the current uptime
@@ -608,9 +610,44 @@ local function wakeup(widget)
     end
 end
 
+local function read(widget) -- Read configuration from storage
+    print("Performing Read")
+    widget.numBatts = storage.read("numBatts") or 0
+    widget.useCapacity = storage.read("useCapacity") or 80
+    widget.Batteries = {}
+    if widget.numBatts > 0 then
+        for i = 1, widget.numBatts do
+            local name = storage.read("Battery" .. i .. "_name") or "Battery " .. i
+            local capacity = storage.read("Battery" .. i .. "_capacity") or 0
+            local modelID = storage.read("Battery" .. i .. "_modelID") or 0
+            local favorite = storage.read("Battery" .. i .. "_favorite") or false
+            widget.Batteries[i] = {
+                name = name,
+                capacity = capacity,
+                modelID = modelID,
+                favorite = favorite
+            }
+        end
+    end
+
+    widget.checkBatteryVoltageOnConnect = storage.read("checkBatteryVoltageOnConnect") or false
+    if widget.checkBatteryVoltageOnConnect then
+        widget.minChargedCellVoltage = storage.read("minChargedCellVoltage") or 415
+        widget.doHaptic = storage.read("doHaptic") or false
+        widget.hapticPattern = storage.read("hapticPattern") or 1
+    end
+    
+    widget.Images = { Default = storage.read("ImagesDefault") or "" }
+    buildUniqueIds(widget)
+    for i, id in ipairs(widget.uniqueIDs) do
+        widget.Images[id] = storage.read("Images" .. id) or ""
+    end
+    widget.ready = true
+end
 
 -- This function is called when the user first selects the widget from the widget list, or when they select "configure widget"
 local function configure(widget)
+    read(widget)
     local debug = useDebug.configure
     -- Fill Batteries panel
     if debug then print("Debug(configure): Filling Battery Panel") end
@@ -643,48 +680,6 @@ local function configure(widget)
     -- fillAlertsPanel(alertsPanel, widget)
 end
 
-local function read(widget) -- Read configuration from storage
-    widget.numBatts = storage.read("numBatts") or 0
-    widget.useCapacity = storage.read("useCapacity") or 80
-    widget.Batteries = {}
-    if widget.numBatts > 0 then
-        for i = 1, widget.numBatts do
-            local name = storage.read("Battery" .. i .. "_name") or "Battery " .. i
-            local capacity = storage.read("Battery" .. i .. "_capacity") or 0
-            local modelID = storage.read("Battery" .. i .. "_modelID") or 0
-            local favorite = storage.read("Battery" .. i .. "_favorite") or false
-            widget.Batteries[i] = {
-                name = name,
-                capacity = capacity,
-                modelID = modelID,
-                favorite = favorite
-            }
-        end
-    end
-    local uniqueIDs = {}
-    local seen = {}
-    for i = 1, widget.numBatts do
-        local id = widget.Batteries[i].modelID
-        if not seen[id] then
-            seen[id] = true
-            table.insert(uniqueIDs, id)
-        end
-    end
-
-    widget.checkBatteryVoltageOnConnect = storage.read("checkBatteryVoltageOnConnect") or false
-    if widget.checkBatteryVoltageOnConnect then
-        widget.minChargedCellVoltage = storage.read("minChargedCellVoltage") or 415
-        widget.doHaptic = storage.read("doHaptic") or false
-        widget.hapticPattern = storage.read("hapticPattern") or 1
-    end
-    
-    widget.Images = { Default = storage.read("ImagesDefault") or "" }
-    for i = 1, #uniqueIDs do
-        local id = uniqueIDs[i]
-        Images[id] = storage.read("Images" .. id)
-    end
-end
-
 
 local function write(widget) -- Write configuration to storage
     storage.write("numBatts", widget.numBatts)
@@ -715,17 +710,14 @@ end
 
 local function paint(widget) end
 
-local function event(widget, category, value, x, y) end
-
 local function init()
     system.registerWidget({
         key = "battsel",
         name = "Battery Select",
         create = create,
         build = build,
-        paint = paint,
-        event = event,
         wakeup = wakeup,
+        paint = paint,
         configure = configure,
         read = read,
         write = write,
