@@ -1,6 +1,5 @@
 -- Lua Battery Selector and Alarm widget
 -- BattSelect + ETHOS LUA configuration
-
 -- Set to true to enable debug output for each function as needed
 local useDebug = {
     fillFavoritesPanel = true,
@@ -8,7 +7,7 @@ local useDebug = {
     fillBatteryPanel = true,
     fillPrefsPanel = true,
     doBatteryVoltageCheck = true,
-    updateRemainingSensor = true,
+    updateRemainingSensor = false,
     getmAh = true,
     create = true,
     build = true,
@@ -17,86 +16,181 @@ local useDebug = {
     configure = true
 }
 
+local hapticPatterns = {{". . . . . .", 1}, {". - . - . - .", 2}, {". - - . - - . - - . - - .", 3}}
+
 -- Get Radio Version to determine field size
 local radio = system.getVersion()
 
-local function buildUniqueIds(widget)
-    widget.uniqueIDs = {}
+-- This function is called when the widget is first created
+local function create()
+    local widget = {
+        useCapacity = nil,
+        selectedBattery = nil,
+        doHaptic = nil,
+        hapticPattern = nil,
+
+        numBatts = 0,
+        Batteries = {},
+        Images = {},
+
+        lastmAh = 0,
+
+        modelIds = {},
+        lastModelID = nil,
+        currentModelID = nil,
+
+        lastTime = os.clock(),
+        matchingBatteries = {},
+
+        tlmActive = false,
+
+        voltageCheckEnabled = false,
+        voltageCheckCompleted = false,
+        voltageCheckMinChargedCellVoltage = nil,
+        voltageCheckLastCheckTime = nil,
+        voltageCheckBatteryConnectTime = nil,
+
+        widgetRebuildRequired = false,
+
+        rebuildPrefs = false,
+
+        widgetInitialized = false, -- Tracks whether the widget has been initalized.
+        fieldHeight = nil,
+        fieldWidth = nil,
+
+        favoritesPanel = nil,
+        imagePanel = nil,
+        batteryPanel = nil,
+        prefsPanel = nil,
+
+        percentSensor = nil,
+        mahSensor = nil,
+        modelIDSensor = nil,
+        cellSensor = nil,
+        voltageSensor = nil
+    }
+    return widget
+end
+
+local function populateModelIds(widget)
+    widget.modelIds = {}
     local seen = {}
-    for i = 1, #widget.Batteries do
-        local id = widget.Batteries[i].modelID
-        if not seen[id] then
-            seen[id] = true
-            table.insert(widget.uniqueIDs, id)
+    for i, battery in ipairs(widget.Batteries) do
+        if not seen[battery.modelID] then
+            seen[battery.modelID] = true
+            table.insert(widget.modelIds, battery.modelID)
         end
     end
 end
 
 -- Favorites Panel in Configure
 local function fillFavoritesPanel(widget)
-    widget.favoritesPanel:clear()
-    -- Create list of Unique IDs from on all Batteries' IDs
-    buildUniqueIds(widget)
+    if not widget.favoritesPanel then
+        widget.favoritesPanel = form.addExpansionPanel("Favorites")
+        widget.favoritesPanel:open(false)
+    else 
+        widget.favoritesPanel:clear()
+    end
 
-    -- List out available unique Model IDs in the Favorites panel
-    for i, id in ipairs(widget.uniqueIDs) do
-        local line = widget.favoritesPanel:addLine("ID " .. id .. " Favorite")
+    populateModelIds(widget)
+    -- List out available Model IDs in the Favorites panel
+    for _, modelId in ipairs(widget.modelIds) do
+        local line = widget.favoritesPanel:addLine("ID " .. modelId .. " Favorite")
 
         -- Create Favorite picker field
         local matchingNames = {}
-        for j = 1, widget.numBatts do
-            if widget.Batteries[j].modelID == id then
-                matchingNames[#matchingNames + 1] = {widget.Batteries[j].name, j}
+        for i, battery in ipairs(widget.Batteries) do
+            if battery.modelID == modelId then
+                matchingNames[#matchingNames + 1] = {battery.name, i}
             end
         end
         local field = form.addChoiceField(line, nil, matchingNames, function()
-            for j = 1, #widget.Batteries do
-                if widget.Batteries[j].modelID == id and widget.Batteries[j].favorite then
+            for j, battery in ipairs(widget.Batteries) do
+                if battery.modelID == modelId and battery.favorite then
                     return j
                 end
             end
             return nil
         end, function(value)
-            for j = 1, #widget.Batteries do
-                if widget.Batteries[j].modelID == id then
-                    widget.Batteries[j].favorite = (j == value)
+            for j, battery in ipairs(widget.Batteries) do
+                if battery.modelID == modelId then
+                    battery.favorite = (j == value)
                 end
             end
         end)
     end
 end
 
-
 local function fillImagePanel(widget)
     local debug = useDebug.fillImagePanel
 
-    widget.imagePanel:clear()
+    if not widget.imagePanel then
+        widget.imagePanel = form.addExpansionPanel("Images")
+        widget.imagePanel:open(false)
+    else
+        widget.imagePanel:clear()
+    end
 
     local line = widget.imagePanel:addLine("Default Image")
-    local field = form.addFileField(line, nil, "/bitmaps/models", "image+ext", function() return widget.Images.Default or "" end, function(newValue) widget.Images.Default = newValue end)
+    local field = form.addFileField(line, nil, "/bitmaps/models", "image+ext", function()
+        return widget.Images.Default or ""
+    end, function(newValue)
+        widget.Images.Default = newValue
+    end)
 
-    if debug and widget.Images.Default then print("Debug(fillImagePanel):" .. "Default Image: " .. widget.Images.Default) end
+    if debug and widget.Images.Default then
+        print("Debug(fillImagePanel):" .. "Default Image: " .. widget.Images.Default)
+    end
 
     -- List out available Model IDs in the Favorites panel
-    for i, id in ipairs(widget.uniqueIDs) do
-        local line = widget.imagePanel:addLine("ID " .. widget.uniqueIDs[i] .. " Image")
-        local id = widget.uniqueIDs[i]
+    for i, modelId in ipairs(widget.modelIds) do
+        local line = widget.imagePanel:addLine("ID " .. modelId .. " Image")
 
         local field = form.addFileField(line, nil, "/bitmaps/models", "image+ext", function()
-            return widget.Images[id] or ""
+            return widget.Images[modelId] or ""
         end, function(newValue)
-            widget.Images[id] = newValue
+            widget.Images[modelId] = newValue
         end)
-        if debug then print("Debug(fillImagePanel): Image for ID " .. id .. ": " .. widget.Images[id]) end
+        if debug then
+            print("Debug(fillImagePanel): Image for Model ID " .. modelId .. ": " .. widget.Images[modelId])
+        end
     end
 end
 
+local function requestWidgetRebuild(widget)
+    widget.widgetRebuildRequired = true
+end
+
+local function resetBatteryVoltageCheck(widget, completed)
+    widget.voltageCheckCompleted = completed
+
+    widget.voltageCheckLastCheckTime = nil
+    widget.voltageCheckBatteryConnectTime = nil
+end
+
+local function resetWidget(widget)
+    widget.selectedBattery = nil
+    widget.lastmAh = 0
+    widget.lastModelID = nil
+    widget.currentModelID = nil
+    widget.matchingBatteries = {}
+
+    resetBatteryVoltageCheck(widget, false)
+    requestWidgetRebuild(widget)
+end
 
 local function fillBatteryPanel(widget)
     local debug = useDebug.fillBatteryPanel
-    if debug then print("Debug(fillBatteryPanel): Filling Battery Panel") end
+    if debug then
+        print("Debug(fillBatteryPanel): Begin filling battery panel")
+    end
 
-    widget.batteryPanel:clear()
+    if not widget.batteryPanel then
+        widget.batteryPanel = form.addExpansionPanel("Batteries")
+        widget.batteryPanel:open(false)
+    else
+        widget.batteryPanel:clear() 
+    end
 
     local pos_header_battery
     local pos_header_capacity
@@ -109,26 +203,106 @@ local function fillBatteryPanel(widget)
 
     if string.find(radio.board, "X20") or radio.board == "X18R" or radio.board == "X18RS" then
         -- Header text positions
-        pos_header_battery = {x = 10, y = 8, w = 200, h = 40}
-        pos_header_capacity = {x = 530, y = 8, w = 100, h = 40}
-        pos_header_id = {x = 655, y = 8, w = 100, h = 40}
+        pos_header_battery = {
+            x = 10,
+            y = 8,
+            w = 200,
+            h = 40
+        }
+        pos_header_capacity = {
+            x = 530,
+            y = 8,
+            w = 100,
+            h = 40
+        }
+        pos_header_id = {
+            x = 655,
+            y = 8,
+            w = 100,
+            h = 40
+        }
         -- Value positions
-        pos_value_name = {x = 8, y = 8, w = 400, h = 40}
-        pos_value_capacity = {x = 504, y = 8, w = 130, h = 40}
-        pos_value_id = {x = 642, y = 8, w = 50, h = 40}
-        pos_options_button = {x = 700, y = 8, w = 50, h = 40}
-        pos_add_button = {x = 642, y = 8, w = 108, h = 40}
+        pos_value_name = {
+            x = 8,
+            y = 8,
+            w = 400,
+            h = 40
+        }
+        pos_value_capacity = {
+            x = 504,
+            y = 8,
+            w = 130,
+            h = 40
+        }
+        pos_value_id = {
+            x = 642,
+            y = 8,
+            w = 50,
+            h = 40
+        }
+        pos_options_button = {
+            x = 700,
+            y = 8,
+            w = 50,
+            h = 40
+        }
+        pos_add_button = {
+            x = 642,
+            y = 8,
+            w = 108,
+            h = 40
+        }
     elseif radio.board == "X18" or radio.board == "X18S" or radio.board == "TWXLITE" or radio.board == "TWXLITES" then
         -- Header text positions
-        pos_header_battery = {x = 6, y = 6, w = 200, h = 30}
-        pos_header_capacity = {x = 300, y = 6, w = 100, h = 30}
-        pos_header_id = {x = 390, y = 6, w = 100, h = 30}
+        pos_header_battery = {
+            x = 6,
+            y = 6,
+            w = 200,
+            h = 30
+        }
+        pos_header_capacity = {
+            x = 300,
+            y = 6,
+            w = 100,
+            h = 30
+        }
+        pos_header_id = {
+            x = 390,
+            y = 6,
+            w = 100,
+            h = 30
+        }
         -- Value positions
-        pos_value_name = {x = 6, y = 6, w = 275, h = 30}
-        pos_value_capacity = {x = 288, y = 6, w = 85, h = 30}
-        pos_value_id = {x = 379, y = 6, w = 35, h = 30}
-        pos_options_button = {x = 420, y = 6, w = 35, h = 30}
-        pos_add_button = {x = 375, y = 6, w = 80, h = 30}
+        pos_value_name = {
+            x = 6,
+            y = 6,
+            w = 275,
+            h = 30
+        }
+        pos_value_capacity = {
+            x = 288,
+            y = 6,
+            w = 85,
+            h = 30
+        }
+        pos_value_id = {
+            x = 379,
+            y = 6,
+            w = 35,
+            h = 30
+        }
+        pos_options_button = {
+            x = 420,
+            y = 6,
+            w = 35,
+            h = 30
+        }
+        pos_add_button = {
+            x = 375,
+            y = 6,
+            w = 80,
+            h = 30
+        }
     else
         -- Currently not tested on other radios (X10,X12,X14)
     end
@@ -139,56 +313,79 @@ local function fillBatteryPanel(widget)
     local field = form.addStaticText(line, pos_header_capacity, "Capacity")
     local field = form.addStaticText(line, pos_header_id, "ID")
 
-    for i = 1, widget.numBatts do
+    -- for i = 1, widget.numBatts do
+    for i, battery in ipairs(widget.Batteries) do
         local line = widget.batteryPanel:addLine("")
-        local field = form.addTextField(line, pos_value_name, function() return widget.Batteries[i].name end, function(newName)
-            widget.Batteries[i].name = newName
-            widget.rebuildWidget = true
+
+        local field = form.addTextField(line, pos_value_name, function()
+            return battery.name
+        end, function(newName)
+            battery.name = newName
+            requestWidgetRebuild(widget)
         end)
 
-        local field = form.addNumberField(line, pos_value_capacity, 0, 20000, function() return widget.Batteries[i].capacity end, function(value)
-            widget.Batteries[i].capacity = value
-            widget.rebuildWidget = true
+        local field = form.addNumberField(line, pos_value_capacity, 0, 20000, function()
+            return battery.capacity
+        end, function(value)
+            battery.capacity = value
+            requestWidgetRebuild(widget)
         end)
         field:suffix("mAh")
         field:step(100)
         field:default(0)
         field:enableInstantChange(false)
-        local field = form.addNumberField(line, pos_value_id, 0, 99, function() return widget.Batteries[i].modelID end, function(value)
-            widget.Batteries[i].modelID = value
+
+        local field = form.addNumberField(line, pos_value_id, 0, 99, function()
+            return battery.modelID
+        end, function(value)
+            battery.modelID = value
             fillFavoritesPanel(widget)
             fillImagePanel(widget)
-            widget.rebuildWidget = true
+            requestWidgetRebuild(widget)
         end)
+
         field:default(0)
         field:enableInstantChange(false)
+
         local field = form.addTextButton(line, pos_options_button, "...", function()
-            local buttons = {
-                {label = "Cancel", action = function() return true end},
-                {label = "Delete", action = function()
+            local buttons = {{
+                label = "Cancel",
+                action = function()
+                    return true
+                end
+            }, {
+                label = "Delete",
+                action = function()
                     table.remove(widget.Batteries, i)
                     widget.numBatts = widget.numBatts - 1
                     fillBatteryPanel(widget)
                     fillFavoritesPanel(widget)
-                    widget.rebuildWidget = true
+                    requestWidgetRebuild(widget)
                     return true
-                end},
-                {label = "Clone", action = function()
-                    local newBattery = {name = widget.Batteries[i].name, capacity = widget.Batteries[i].capacity, modelID = widget.Batteries[i].modelID, favorite = false}
+                end
+            }, {
+                label = "Clone",
+                action = function()
+                    local newBattery = {
+                        name = battery.name,
+                        capacity = battery.capacity,
+                        modelID = battery.modelID,
+                        favorite = false
+                    }
                     table.insert(widget.Batteries, newBattery)
                     widget.numBatts = widget.numBatts + 1
                     fillFavoritesPanel(widget)
                     fillImagePanel(widget)
-                    widget.rebuildWidget = true
+                    requestWidgetRebuild(widget)
                     return true
-                end}
-            }
+                end
+            }}
             form.openDialog({
-                title = (widget.Batteries[i].name ~= "" and widget.Batteries[i].name or "Unnamed Battery"),
+                title = (battery.name ~= "" and battery.name or "Unnamed Battery"),
                 message = "Select Action",
                 width = 350,
                 buttons = buttons,
-                options = TEXT_LEFT,
+                options = TEXT_LEFT
             })
         end)
     end
@@ -196,48 +393,81 @@ local function fillBatteryPanel(widget)
     local line = widget.batteryPanel:addLine("")
     local field = form.addTextButton(line, pos_add_button, "Add New", function()
         widget.numBatts = widget.numBatts + 1
-        widget.Batteries[widget.numBatts] = {name = "Battery " .. widget.numBatts, capacity = 0, modelID = 0}
+        widget.Batteries[widget.numBatts] = {
+            name = "Battery " .. widget.numBatts,
+            capacity = 0,
+            modelID = 0
+        }
         fillBatteryPanel(widget)
         fillFavoritesPanel(widget)
         fillImagePanel(widget)
-        widget.rebuildWidget = true
+        requestWidgetRebuild(widget)
     end)
 end
-
-local hapticPatterns = {{". . . . . .", 1}, {". - . - . - .", 2}, {". - - . - - . - - . - - .", 3}}
 
 -- Settings Panel
 local function fillPrefsPanel(widget)
     local debug = useDebug.fillPrefsPanel
-    if debug then print("Debug(fillPrefsPanel): Filling Preferences Panel") end
+    if debug then
+        print("Debug(fillPrefsPanel): Filling Preferences Panel")
+    end
 
-    widget.prefsPanel:clear()
+    if not widget.prefsPanel then
+        widget.prefsPanel = form.addExpansionPanel("Preferences")
+        widget.prefsPanel:open(false)
+    else 
+        widget.prefsPanel:clear()
+    end
 
     local line = widget.prefsPanel:addLine("Use Capacity")
-    local field = form.addNumberField(line, nil, 50, 100, function() return widget.useCapacity or 80 end, function(value) widget.useCapacity = value end)
+    local field = form.addNumberField(line, nil, 50, 100, function()
+        return widget.useCapacity or 80
+    end, function(value)
+        widget.useCapacity = value
+    end)
     field:suffix("%")
     field:default(80)
 
     -- Create field to enable/disable battery voltage checking on connect
     local line = widget.prefsPanel:addLine("Enable Voltage Check")
-    local field = form.addBooleanField(line, nil, function() return widget.checkBatteryVoltageOnConnect end, function(newValue) widget.checkBatteryVoltageOnConnect = newValue widget.rebuildPrefs = true end)
+    local field = form.addBooleanField(line, nil, function()
+        return widget.checkBatteryVoltageOnConnect
+    end, function(newValue)
+        widget.checkBatteryVoltageOnConnect = newValue
+        widget.rebuildPrefs = true
+    end)
     if widget.checkBatteryVoltageOnConnect then
         local line = widget.prefsPanel:addLine("Min Charged Volt/Cell")
-        local field = form.addNumberField(line, nil, 400, 430, function() return widget.minChargedCellVoltage or 415 end, function(value) widget.minChargedCellVoltage = value end)
+        local field = form.addNumberField(line, nil, 400, 430, function()
+            return widget.minChargedCellVoltage or 415
+        end, function(value)
+            widget.minChargedCellVoltage = value
+        end)
         field:decimals(2)
         field:suffix("V")
         field:enableInstantChange(false)
         local line = widget.prefsPanel:addLine("Haptic Warning")
-        local field = form.addBooleanField(line, nil, function() return widget.doHaptic end, function(newValue) widget.doHaptic = newValue widget.rebuildPrefs = true end)
-        if widget.doHaptic then 
-            if widget.hapticPattern == nil then widget.hapticPattern = 1 end
+        local field = form.addBooleanField(line, nil, function()
+            return widget.doHaptic
+        end, function(newValue)
+            widget.doHaptic = newValue
+            widget.rebuildPrefs = true
+        end)
+        if widget.doHaptic then
+            if widget.hapticPattern == nil then
+                widget.hapticPattern = 1
+            end
             local line = widget.prefsPanel:addLine("Haptic Pattern")
-            local field = form.addChoiceField(line, nil, hapticPatterns, function() return widget.hapticPattern end, function(newValue) widget.hapticPattern = newValue end)
+            local field = form.addChoiceField(line, nil, hapticPatterns, function()
+                return widget.hapticPattern
+            end, function(newValue)
+                widget.hapticPattern = newValue
+            end)
         end
     end
 
     if useDebug.fillPrefsPanel then
-        print("fillingPrefsPanel")
+        print("Debug(fillPrefsPanel): Filled Preferences Panel")
     end
 end
 
@@ -249,94 +479,151 @@ end
 -- Estimate cellcount and check if battery is charged.  If not, popup dialog to alert user
 local function doBatteryVoltageCheck(widget)
     local debug = useDebug.doBatteryVoltageCheck
-    if debug then print("Debug(doBatteryVoltageCheck): Running Battery Voltage Check") end
+    if debug then
+        print("Debug(doBatteryVoltageCheck): Running Battery Voltage Check")
+    end
+
+    if not widget.tlmActive then -- reset the voltage check if telemetry is not active or the voltage check is not enabled
+        resetBatteryVoltageCheck(widget, false)
+        return
+    end
+
+    if widget.voltageCheckComplete or not widget.voltageCheckEnable then
+        resetBatteryVoltageCheck(widget, true)
+        return
+    end
+
+    local now = os.clock()
+    widget.voltageCheckLastCheckTime = now
+
+    if not widget.voltageCheckBatteryConnectTime then
+        widget.voltageCheckBatteryConnectTime = now
+        return -- not ready to check the battery voltage as we want to wait 3 seconds after connecting the battery
+    end
+
+    if (now - widget.voltageCheckBatteryConnectTime) < 3 then
+        resetBatteryVoltageCheck(widget, true)
+        return
+    end
 
     local cellCount
     local currentVoltage
     local isCharged
 
-    if not widget.batteryConnectTime then
-        widget.batteryConnectTime = os.clock()
+    if (now - widget.batteryConnectTime) > 30 then
+        resetBatteryVoltageCheck(widget, true)
+        return
     end
 
-    if widget.batteryConnectTime and (os.clock() - widget.batteryConnectTime) <= 30 then
-        -- Check if cell count sensor exists (RF 2.2? only), if not, get it
-        if not widget.cellSensor then
-            widget.cellSensor = system.getSource({category = CATEGORY_TELEMETRY, name = "Cell Count"})
-            if widget.cellSensor then
-                if debug then print("Debug(doBatteryVoltageCheck): RF Cell Count sensor found.  Continuing") end
-            else
-                if debug then print("Debug(doBatteryVoltageCheck): RF Cell Count sensor not found.  Proceeding with estimation from Voltage") end
+    -- Check if cell count sensor exists (RF 2.2? only), if not, get it
+    if not widget.cellSensor then
+        widget.cellSensor = system.getSource({
+            category = CATEGORY_TELEMETRY,
+            name = "Cell Count"
+        })
+        if widget.cellSensor then
+            if debug then
+                print("Debug(doBatteryVoltageCheck): RF Cell Count sensor found. Continuing")
+            end
+        else
+            if debug then
+                print(
+                    "Debug(doBatteryVoltageCheck): RF Cell Count sensor not found. Proceeding with estimation from Voltage")
             end
         end
+    end
 
-        -- Check if voltage sensor exists, if not, get it
-        if not widget.voltageSensor then
-            widget.voltageSensor = system.getSource({category = CATEGORY_TELEMETRY, name = "Voltage"})
-            if widget.voltageSensor then 
-                if debug then print("Debug(doBatteryVoltageCheck): Voltage Sensor Found.  Continuing") end
-            else
-                if debug then print ("Debug(doBatteryVoltageCheck): Voltage sensor not found.  Exiting") end
-                return
+    -- Check if voltage sensor exists, if not, get it
+    if not widget.voltageSensor then
+        widget.voltageSensor = system.getSource({
+            category = CATEGORY_TELEMETRY,
+            name = "Voltage"
+        })
+        if widget.voltageSensor then
+            if debug then
+                print("Debug(doBatteryVoltageCheck): Voltage Sensor Found.  Continuing")
             end
+        else
+            if debug then
+                print("Debug(doBatteryVoltageCheck): Voltage sensor not found.  Exiting")
+            end
+            return
         end
-        
-        if widget.cellSensor and widget.voltageSensor then
-            currentVoltage = widget.voltageSensor:value()
-            cellCount = math.floor(widget.cellSensor:value())
-            isCharged = currentVoltage >= cellCount * widget.minChargedCellVoltage 
-            widget.doneVoltageCheck = true
-        elseif widget.voltageSensor then
-            currentVoltage = widget.voltageSensor:value()
-            -- Estimate cell count based on voltage
-            cellCount = math.floor(currentVoltage / widget.minChargedCellVoltage + 0.5)
-            -- To prevent accidentally reading a very low battery as a lower cell count than actual, add 1 to cellCount if the voltage is higher than cellCount * 4.35 (HV battery max cell voltage)
-            if currentVoltage >= cellCount * 4.35 then
-                cellCount = cellCount + 1
-            end    
+    end
+
+    currentVoltage = widget.voltageSensor:value()
+
+    if not currentVoltage then
+        return -- not ready for voltage check, the voltage sensor value was nil
+    end
+
+    if widget.cellSensor then
+        cellCount = math.floor(widget.cellSensor:value())
+        isCharged = currentVoltage >= cellCount * widget.minChargedCellVoltage
+    else
+        -- Estimate cell count based on voltage
+        cellCount = math.floor(currentVoltage / widget.minChargedCellVoltage + 0.5)
+        -- To prevent accidentally reading a very low battery as a lower cell count than actual, add 1 to cellCount if the voltage is higher than cellCount * 4.35 (HV battery max cell voltage)
+        if currentVoltage >= cellCount * 4.35 then
+            cellCount = cellCount + 1
         end
 
-        if cellCount == 0  then
+        if cellCount == 0 then
             cellCount = 1
         end
 
-        if cellCount and currentVoltage then 
-            isCharged = currentVoltage >= cellCount * widget.minChargedCellVoltage 
-            if debug then 
-                print("Debug(doBatteryVoltageCheck): Voltage Sensor Found.  Reading: " .. currentVoltage .. "V")
-                print("Debug(doBatteryVoltageCheck): Cell Count: " .. cellCount)
-                print("Debug(doBatteryVoltageCheck): Battery Charged: " .. tostring(isCharged)) 
-            end
-
-            if isCharged == false and widget.voltageDialogDismissed == false then
-                if debug then print ("Debug(doBatteryVoltageCheck): Battery not charged!  Popup dialog") end
-                local buttons = {
-                    {label = "OK", action = function()
-                        widget.voltageDialogDismissed = true 
-                        if debug then print("Debug(doBatteryVoltageCheck): Voltage Dialog Dismissed") end
-                        return true 
-                    end}}
-                if widget.doHaptic then
-                    if debug then print("Debug(doBatteryVoltageCheck): Playing Haptic") end
-                    system.playHaptic(hapticPatterns[widget.hapticPattern][1])
-                end
-                form.openDialog({
-                    title = "Low Battery Voltage",
-                    message = "Battery may not be charged!",
-                    width = 350,
-                    buttons = buttons,
-                    options = TEXT_LEFT,
-                })
-            end
-            widget.doneVoltageCheck = true 
+        isCharged = currentVoltage >= cellCount * widget.minChargedCellVoltage
+        if debug then
+            print("Debug(doBatteryVoltageCheck): Voltage Sensor Found.  Reading: " .. currentVoltage .. "V")
+            print("Debug(doBatteryVoltageCheck): Cell Count: " .. cellCount)
+            print("Debug(doBatteryVoltageCheck): Battery Charged: " .. tostring(isCharged))
         end
     end
+
+    if not isCharged then
+        if debug then
+            print("Debug(doBatteryVoltageCheck): Battery not charged!  Popup dialog")
+        end
+        local buttons = {{
+            label = "OK",
+            action = function()
+                if debug then
+                    print("Debug(doBatteryVoltageCheck): Voltage Dialog Dismissed")
+                end
+                return true
+            end
+        }}
+        if widget.doHaptic then
+            if debug then
+                print("Debug(doBatteryVoltageCheck): Playing Haptic")
+            end
+            system.playHaptic(hapticPatterns[widget.hapticPattern][1])
+        end
+        form.openDialog({
+            title = "Low Battery Voltage",
+            message = "Battery may not be charged!",
+            width = 350,
+            buttons = buttons,
+            options = TEXT_LEFT
+        })
+    end
+
+    resetBatteryVoltageCheck(widget, true)
 end
 
-local function updateRemainingSensor(widget)
-    if widget.percentSensor == nil then
-        widget.percentSensor = system.getSource({category = CATEGORY_TELEMETRY, appId = 0x4402, physId = 0x11, name = "Remaining"})
-        if widget.percentSensor == nil then
+local function updateRemainingSensor(widget, newPercent)
+    if useDebug.remainingSensorUpdate then
+        print("Debug(updateRemainingSensor): Updating Remaining Sensor with new value: " .. newPercent)
+    end
+
+    if not widget.percentSensor then
+        widget.percentSensor = system.getSource({
+            category = CATEGORY_TELEMETRY,
+            appId = 0x4402,
+            physId = 0x11,
+            name = "Remaining"
+        })
+        if not widget.percentSensor then
             widget.percentSensor = model.createSensor()
             widget.percentSensor:name("Remaining")
             widget.percentSensor:unit(UNIT_PERCENT)
@@ -344,16 +631,18 @@ local function updateRemainingSensor(widget)
             widget.percentSensor:appId(0x4402)
             widget.percentSensor:physId(0x11)
         end
-    end 
-    if widget.percentSensor ~= nil then
-        widget.percentSensor:value(widget.newPercent)
     end
+
+    widget.percentSensor:value(newPercent)
 end
 
 local function getmAh(widget)
     if widget.mAhSensor == nil then
         for member = 0, 50 do
-            local candidate = system.getSource({category = CATEGORY_TELEMETRY_SENSOR, member = member})
+            local candidate = system.getSource({
+                category = CATEGORY_TELEMETRY_SENSOR,
+                member = member
+            })
             if candidate then
                 if candidate:unit() == UNIT_MILLIAMPERE_HOUR then
                     widget.mAhSensor = candidate
@@ -362,14 +651,14 @@ local function getmAh(widget)
             end
         end
 
-        if widget.mAhSensor == nil then
+        if not widget.mAhSensor then
             print("No mAh sensor found!")
             return 0
         end
     end
-    
+
     -- Return the value or 0 if no valid sensor was found
-    if widget.mAhSensor and widget.mAhSensor:value() ~= nil then
+    if widget.mAhSensor and widget.mAhSensor:value() then
         if useDebug.getmAh then
             print("Debug(getmAh): mAh Reading: " .. math.floor(widget.mAhSensor:value()) .. "mAh")
         end
@@ -379,110 +668,15 @@ local function getmAh(widget)
     end
 end
 
--- This function is called when the widget is first created
-local function create()
-    local widget = {
-        useCapacity = nil,
-        percentSensor = nil,
-        mahSensor = nil,
-        modelIDSensor = nil,
-        cellSensor = nil,
-        voltageSensor = nil,
-        newPercent = 100,
-        lastmAh = 0,
-        lastModelID = nil,
-        currentModelID = nil,
-        lastTime = os.clock(),
-        lastBattCheckTime = os.clock(),
-        selectedBattery = nil,
-        matchingBatteries = nil,
-        tlmActive = false,
-        resetDone = false,
-        voltageDialogDismissed = false,
-        doneVoltageCheck = false,
-        batteryConnectTime = nil,
-
-
-        widgetInit = true, -- Tracks whether the widget needs to be initalized.
-        fieldHeight = nil,
-        fieldWidth = nil,
-        
-        numBatts = 0,
-        Batteries = {},
-        uniqueIDs = {},
-        Images = {},
-        
-        favoritesPanel = nil,
-        imagePanel = nil,
-        batteryPanel = nil,
-        prefsPanel = nil,
-        
-        rebuildWidget = false,
-        rebuildPrefs = false,
-
-        checkBatteryVoltageOnConnect = nil,
-        minChargedCellVoltage = nil,
-        doHaptic = nil,
-        hapticPattern = nil,
-        ready = false,
-    }
-    return widget
-end
-
 local function build(widget)
     print("Performing Build")
     local debug = useDebug.build
 
-    local w, h = lcd.getWindowSize()
-
-    -- Refresh the matchingBatteries list based on currentModelID
-    widget.matchingBatteries = {}
-    if #widget.Batteries > 0 then
-        if widget.currentModelID then
-            if debug then print ("Debug(build): Current Model ID: " .. widget.currentModelID) end
-            for i = 1, #widget.Batteries do
-                if widget.Batteries[i].modelID == widget.currentModelID then
-                    widget.matchingBatteries[#widget.matchingBatteries + 1] = {widget.Batteries[i].name, i}
-                end
-            end
-            for i = 1, #widget.Batteries do
-                if widget.Batteries[i].modelID == widget.currentModelID and widget.Batteries[i].favorite then
-                    widget.selectedBattery = i
-                    break
-                end
-            end
-        else
-            for i = 1, #widget.Batteries do
-                widget.matchingBatteries[#widget.matchingBatteries + 1] = {widget.Batteries[i].name, i}
-            end
-            if #widget.matchingBatteries > 0 then
-                widget.selectedBattery = widget.matchingBatteries[1][2]
-            end
-        end
-    end
-
-    if not widget.selectedBattery then
-        widget.selectedBattery = 1
-    end
-
-    if debug then
-        local batteryNames = {}
-        for i, battery in ipairs(widget.matchingBatteries) do
-            table.insert(batteryNames, battery[1])
-        end
-        if batteryNames then print("Debug(build): Matching Batteries: " .. table.concat(batteryNames, ", ")) end
-        if widget.Batteries[widget.selectedBattery] then 
-            local batteryInfo = "Debug(build): Selected Battery: " .. widget.Batteries[widget.selectedBattery].name
-            if widget.Batteries[widget.selectedBattery].favorite then
-            batteryInfo = batteryInfo .. " (Favorite)"
-            end
-            print(batteryInfo)
-        end
-    end
-
     -- Initialize widget based on radio type
-    if widget.widgetInit then
-        if debug then print("Debug(build): Widget Init") end
+    if not widget.widgetInitialized then
+        if debug then
+            print("Debug(build): Widget Initialization")
+        end
         -- Set form size based on radio type
         if string.find(radio.board, "X20") or radio.board == "X18R" or radio.board == "X18RS" then
             widget.fieldHeight = 40
@@ -493,184 +687,215 @@ local function build(widget)
         else
             -- Currently not tested on other radios (X10,X12,X14)
         end
-        if debug then print("Debug(build): Creating form") end
+        if debug then
+            print("Debug(build): Creating form")
+        end
         form.create()
-        widget.widgetInit = false
+        widget.widgetInitialized = true
     end
-    
-    if widget.fieldHeight and widget.fieldWidth and widget.matchingBatteries then
+
+    local w, h = lcd.getWindowSize()
+
+    -- Refresh the matchingBatteries list based on currentModelID
+    widget.matchingBatteries = {}
+    if widget.tlmActive then
+        if widget.currentModelID then
+            if debug then
+                print("Debug(build): Current Model ID: " .. widget.currentModelID)
+            end
+            for i, battery in ipairs(widget.Batteries) do
+                if battery.modelID == widget.currentModelID then
+                    table.insert(widget.matchingBatteries, battery)
+                    if battery.favorite then
+                        widget.selectedBattery = i
+                    end
+                end
+            end
+        else
+            widget.matchingBatteries = widget.Batteries
+        end
+    end
+
+    if not widget.selectedBattery then
+        widget.selectedBattery = 1
+    end
+
+    if debug then
+        local batteryNames = {}
+        for i, battery in ipairs(widget.matchingBatteries) do
+            table.insert(batteryNames, battery.name)
+        end
+        print("Debug(build): Matching Batteries: " .. table.concat(batteryNames, ", "))
+
+        if widget.Batteries[widget.selectedBattery] then
+            local batteryInfo = "Debug(build): Selected Battery: " .. widget.Batteries[widget.selectedBattery].name
+            if widget.Batteries[widget.selectedBattery].favorite then
+                batteryInfo = batteryInfo .. " (Favorite)"
+            end
+            print(batteryInfo)
+        end
+    end
+
+    if widget.fieldHeight and widget.fieldWidth then
         form.clear()
-        if debug then print("Debug(build): Updating Choice Field") end
+        if debug then
+            print("Debug(build): Updating Choice Field")
+        end
         local pos_x = (w / 2 - widget.fieldWidth / 2)
         local pos_y = (h / 2 - widget.fieldHeight / 2)
 
+        local batteryChoices = {}
+        if #widget.matchingBatteries == 0 then
+            batteryChoices = {"No Connection", 0}
+        else
+            for i, battery in ipairs(widget.matchingBatteries) do
+                table.insert(batteryChoices, {battery.name, battery.id})
+            end
+        end
+
         -- Create form and add choice field for selecting battery
-        local choiceField = form.addChoiceField(line, {x = pos_x, y = pos_y, w = widget.fieldWidth, h = widget.fieldHeight}, widget.matchingBatteries, function() return widget.selectedBattery end, function(value) 
-            widget.selectedBattery = value 
+        local choiceField = form.addChoiceField(nil, {
+            x = pos_x,
+            y = pos_y,
+            w = widget.fieldWidth,
+            h = widget.fieldHeight
+        }, batteryChoices, function()
+            return widget.selectedBattery
+        end, function(value)
+            widget.selectedBattery = value
         end)
     end
 end
 
 local function wakeup(widget)
-    if not widget.ready then -- early return if the widget isn't ready yet, as it needs to be populated
-        return
-    end
     local debug = useDebug.wakeup
 
     -- Get the current uptime
-    local currentTime = os.clock()
+    local now = os.clock()
 
-    if widget.checkBatteryVoltageOnConnect and widget.tlmActive then
-        -- Only run the battery voltage check 3 seconds after telemetry becomes active to prevent reading voltage before Voltage telemetry is established and valid (nonzero)
-        if currentTime - widget.lastBattCheckTime >= 3 then
-            widget.lastBattCheckTime = currentTime
-            -- If telemetry is active and voltage check is enabled, run check if it hasn't been done and dismissed yet
-            if not widget.doneVoltageCheck and not widget.voltageDialogDismissed then
-                if debug then print ("Debug(wakeup): Running Battery Voltage Check") end
-                doBatteryVoltageCheck(widget)
+    if now - widget.lastTime >= 1 then
+        widget.tlmActive = system.getSource({
+            category = CATEGORY_SYSTEM_EVENT,
+            member = TELEMETRY_ACTIVE,
+            options = nil
+        }):state()
+
+        if widget.tlmActive then
+            doBatteryVoltageCheck(widget)
+
+            -- if Batteries exist, telemetry is active, a battery is selected, and the mAh reading is not nil, do the maths
+            local newmAh = getmAh(widget)
+            local remainingPercentage = 100
+
+            if #widget.Batteries > 0 and widget.tlmActive and widget.selectedBattery and newmAh and widget.useCapacity then
+                if newmAh ~= widget.lastmAh then
+                    local usablemAh = widget.Batteries[widget.selectedBattery].capacity * (widget.useCapacity / 100)
+                    remainingPercentage = 100 - (newmAh / usablemAh) * 100
+                    if remainingPercentage < 0 then
+                        remainingPercentage = 0
+                    end
+                    widget.lastmAh = newmAh
+                end
             end
-        end
-    else
-        widget.voltageDialogDismissed = false -- Reset the dialog dismissed flag when telemetry becomes inactive
-        widget.lastBattCheckTime = currentTime -- Reset the timer when telemetry becomes inactive
-    end
 
-    if currentTime - widget.lastTime >= 1 then
-        widget.tlmActive = system.getSource({category = CATEGORY_SYSTEM_EVENT, member = TELEMETRY_ACTIVE, options = nil}):state()
-        -- Reset all doBatteryVoltageCheck parameters when telemetry becomes inactive so that it can run again on next battery connect
-        if not widget.tlmActive and not widget.resetDone then
-            widget.voltageDialogDismissed = false
-            widget.doneVoltageCheck = false
-            widget.batteryConnectTime = nil
-            widget.resetDone = true
-        elseif widget.tlmActive then
-            widget.resetDone = false
-        end
+            updateRemainingSensor(widget, remainingPercentage) -- Update the remaining sensor
 
-        -- if Batteries exist, telemetry is active, a battery is selected, and the mAh reading is not nil, do the maths
-        local newmAh = getmAh(widget)
-        if #widget.Batteries > 0 and widget.tlmActive and widget.selectedBattery and newmAh ~= nil and widget.useCapacity ~= nil then
-            if newmAh ~= widget.lastmAh then
-                local usablemAh = widget.Batteries[widget.selectedBattery].capacity * (widget.useCapacity / 100)
-                widget.newPercent = 100 - (newmAh / usablemAh) * 100
-                if widget.newPercent < 0 then widget.newPercent = 0 end
-                widget.lastmAh = newmAh
+            -- Check for modelID sensor presence and its value
+            if widget.modelIDSensor == nil then
+                widget.modelIDSensor = system.getSource({
+                    category = CATEGORY_TELEMETRY,
+                    name = "Model ID"
+                })
+                if widget.modelIDSensor ~= nil and widget.modelIDSensor:value() ~= nil then
+                    widget.currentModelID = math.floor(widget.modelIDSensor:value())
+                end
+            else
+                if widget.modelIDSensor:value() ~= nil then
+                    widget.currentModelID = math.floor(widget.modelIDSensor:value())
+                end
             end
-        end
 
-        if debug then print ("Debug(wakeup): Updating Remaining Sensor") end
-        updateRemainingSensor(widget) -- Update the remaining sensor
-        
-        -- Check for modelID sensor presence and its value
-        if widget.modelIDSensor == nil then 
-            widget.modelIDSensor = system.getSource({category = CATEGORY_TELEMETRY, name = "Model ID"})
-            if widget.modelIDSensor ~= nil and widget.modelIDSensor:value() ~= nil then
-                widget.currentModelID = math.floor(widget.modelIDSensor:value())
-            end
-        else
-            if widget.modelIDSensor:value() ~= nil then
-                widget.currentModelID = math.floor(widget.modelIDSensor:value())
-            end
-        end
-            
-        local currentBitmapName = model.bitmap():match("([^/]+)$")
+            local currentBitmapName = model.bitmap():match("([^/]+)$")
 
-        -- Set the model image based on the currentModelID.  If not present or invalid, set it to the default image
-        if widget.tlmActive and widget.currentModelID and widget.Images[widget.currentModelID] then
-            if currentBitmapName ~= widget.Images[widget.currentModelID] then
+            -- Set the model image based on the currentModelID.  If not present or invalid, set it to the default image
+            local modelImage = nil
+            if widget.currentModelID and widget.Images[widget.currentModelID] then
+                if currentBitmapName ~= widget.Images[widget.currentModelID] then
+                    modelImage = widget.Images[widget.currentModelID]
+                end
+            elseif widget.Images.Default ~= "" then
+                if currentBitmapName ~= widget.Images.Default then
+                    modelImage = widget.Images.Default
+                    if debug then
+                        print("Debug(wakeup): Setting model image to Default")
+                    end
+                end
+            end
+
+            if modelImage then
                 model.bitmap(widget.Images[widget.currentModelID])
-                if debug then print("Debug(wakeup: Setting model image to " .. (widget.Images[widget.currentModelID])) end
+                if debug then
+                    print("Debug(wakeup): Setting Model Image to: " .. modelImage)
+                end
             end
-        elseif widget.Images.Default ~= "" then
-            if currentBitmapName ~= widget.Images.Default  then
-                model.bitmap(widget.Images.Default)
-                if debug then print("Debug(wakeup): Setting model image to Default: " .. widget.Images.Default) end
-            end
+        elseif now - widget.lastTime >= 5 then
+            resetWidget(widget)
         end
-        widget.lastTime = currentTime
+
+        widget.lastTime = now
     end
 
     -- Check if the modelID has changed since last wakeup, and if so, set the rebuildMatching flag to true
     if widget.currentModelID ~= widget.lastModelID then
-        if debug then print("Debug(wakeup): Model ID has changed") end
-        widget.lastModelID = widget.currentModelID 
-        widget.rebuildWidget = true
+        if debug then
+            print("Debug(wakeup): Model ID has changed")
+        end
+        widget.lastModelID = widget.currentModelID
+        requestWidgetRebuild(widget)
     end
 
-    if widget.rebuildWidget then
-        if debug then print ("Debug(wakeup): Rebuilding widget") end
+    if widget.widgetRebuildRequired then
+        if debug then
+            print("Debug(wakeup): Rebuilding widget")
+        end
         build(widget)
-        widget.rebuildWidget = false
+        widget.widgetRebuildRequired = false
     end
 
     if widget.rebuildPrefs then
-        if debug then print ("Debug(wakeup): Rebuilding Preferences Panel") end
+        if debug then
+            print("Debug(wakeup): Rebuilding Preferences Panel")
+        end
         fillPrefsPanel(widget.prefsPanel, widget)
         widget.rebuildPrefs = false
     end
 end
 
-local function read(widget) -- Read configuration from storage
-    print("Performing Read")
-    widget.numBatts = storage.read("numBatts") or 0
-    widget.useCapacity = storage.read("useCapacity") or 80
-    widget.Batteries = {}
-    if widget.numBatts > 0 then
-        for i = 1, widget.numBatts do
-            local name = storage.read("Battery" .. i .. "_name") or "Battery " .. i
-            local capacity = storage.read("Battery" .. i .. "_capacity") or 0
-            local modelID = storage.read("Battery" .. i .. "_modelID") or 0
-            local favorite = storage.read("Battery" .. i .. "_favorite") or false
-            widget.Batteries[i] = {
-                name = name,
-                capacity = capacity,
-                modelID = modelID,
-                favorite = favorite
-            }
-        end
-    end
-
-    widget.checkBatteryVoltageOnConnect = storage.read("checkBatteryVoltageOnConnect") or false
-    if widget.checkBatteryVoltageOnConnect then
-        widget.minChargedCellVoltage = storage.read("minChargedCellVoltage") or 415
-        widget.doHaptic = storage.read("doHaptic") or false
-        widget.hapticPattern = storage.read("hapticPattern") or 1
-    end
-    
-    widget.Images = { Default = storage.read("ImagesDefault") or "" }
-    buildUniqueIds(widget)
-    for i, id in ipairs(widget.uniqueIDs) do
-        widget.Images[id] = storage.read("Images" .. id) or ""
-    end
-    widget.ready = true
-end
-
 -- This function is called when the user first selects the widget from the widget list, or when they select "configure widget"
 local function configure(widget)
-    read(widget)
     local debug = useDebug.configure
     -- Fill Batteries panel
-    if debug then print("Debug(configure): Filling Battery Panel") end
-    widget.batteryPanel = form.addExpansionPanel("Batteries")
-    widget.batteryPanel:open(false)
+    if debug then
+        print("Debug(configure): Filling Battery Panel")
+    end
     fillBatteryPanel(widget)
 
     -- Fill Favorites panel
-    if debug then print("Debug(configure): Filling Favorites Panel") end
-    widget.favoritesPanel = form.addExpansionPanel("Favorites")
-    widget.favoritesPanel:open(false)
+    if debug then
+        print("Debug(configure): Filling Favorites Panel")
+    end
     fillFavoritesPanel(widget)
 
     -- Fill Images panel
-    if debug then print("Debug(configure): Filling Images Panel") end
-    widget.imagePanel = form.addExpansionPanel("Images")
-    widget.imagePanel:open(false)
+    if debug then
+        print("Debug(configure): Filling Images Panel")
+    end
     fillImagePanel(widget)
 
     -- Preferences Panel
-    if debug then print("Debug(configure): Filling Preferences Panel") end
-    widget.prefsPanel = form.addExpansionPanel("Preferences")
-    widget.prefsPanel:open(false)
+    if debug then
+        print("Debug(configure): Filling Preferences Panel")
+    end
     fillPrefsPanel(widget)
 
     -- Alerts Panel.  Commented out for now as not in use
@@ -680,26 +905,58 @@ local function configure(widget)
     -- fillAlertsPanel(alertsPanel, widget)
 end
 
+local function read(widget) -- Read configuration from storage
+    print("Performing Read")
 
-local function write(widget) -- Write configuration to storage
-    storage.write("numBatts", widget.numBatts)
-    storage.write("useCapacity", widget.useCapacity)
-    if widget.numBatts > 0 then
+    local numBatts = storage.read("numBatts") or 0
+
+    widget.useCapacity = storage.read("useCapacity") or 80
+    widget.Batteries = {}
+    if numBatts > 0 then
         for i = 1, widget.numBatts do
-            storage.write("Battery" .. i .. "_name", widget.Batteries[i].name)
-            storage.write("Battery" .. i .. "_capacity", widget.Batteries[i].capacity)
-            storage.write("Battery" .. i .. "_modelID", widget.Batteries[i].modelID)
-            storage.write("Battery" .. i .. "_favorite", widget.Batteries[i].favorite)
+            widget.Batteries[i] = {
+                id = i,
+                name = storage.read("Battery" .. i .. "_name") or "Battery " .. i,
+                capacity = storage.read("Battery" .. i .. "_capacity") or 0,
+                modelID = storage.read("Battery" .. i .. "_modelID") or 0,
+                favorite = storage.read("Battery" .. i .. "_favorite") or false
+            }
         end
     end
-    storage.write("checkBatteryVoltageOnConnect", widget.checkBatteryVoltageOnConnect)
-    if widget.checkBatteryVoltageOnConnect then
-        storage.write("minChargedCellVoltage", widget.minChargedCellVoltage)
-        storage.write("doHaptic", widget.doHaptic)
-        if widget.doHaptic then storage.write("hapticPattern", widget.hapticPattern) end
+
+    populateModelIds(widget)
+
+    widget.voltageCheckEnabled = storage.read("checkBatteryVoltageOnConnect") or false
+    widget.voltageCheckMinChargedCellVoltage = storage.read("minChargedCellVoltage") or 415
+
+    widget.doHaptic = storage.read("doHaptic") or false
+    widget.hapticPattern = storage.read("hapticPattern") or 1
+
+    widget.Images = {
+        Default = storage.read("ImagesDefault") or ""
+    }
+
+    for _, modelId in ipairs(widget.modelIds) do
+        widget.Images[modelId] = storage.read("Images" .. modelId) or ""
     end
-    
+end
+
+local function write(widget) -- Write configuration to storage
+    storage.write("numBatts", #widget.Batteries)
+    for i, battery in ipairs(widget.Batteries) do
+        storage.write("Battery" .. i .. "_name", battery.name)
+        storage.write("Battery" .. i .. "_capacity", battery.capacity)
+        storage.write("Battery" .. i .. "_modelID", battery.modelID)
+        storage.write("Battery" .. i .. "_favorite", battery.favorite)
+    end
+
+    storage.write("useCapacity", widget.useCapacity)
+    storage.write("checkBatteryVoltageOnConnect", widget.checkBatteryVoltageOnConnect)
+    storage.write("minChargedCellVoltage", widget.minChargedCellVoltage)
+    storage.write("doHaptic", widget.doHaptic)
+    storage.write("hapticPattern", widget.hapticPattern)
     storage.write("ImagesDefault", widget.Images.Default)
+
     for id, image in pairs(widget.Images) do
         if id ~= "Default" then
             storage.write("Images" .. id, image)
@@ -707,8 +964,8 @@ local function write(widget) -- Write configuration to storage
     end
 end
 
-
-local function paint(widget) end
+local function paint(widget)
+end
 
 local function init()
     system.registerWidget({
@@ -720,9 +977,10 @@ local function init()
         paint = paint,
         configure = configure,
         read = read,
-        write = write,
+        write = write
     })
 end
 
-
-return {init = init}
+return {
+    init = init
+}
