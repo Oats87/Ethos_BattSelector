@@ -86,8 +86,7 @@ end
 -- Favorites Panel in Configure
 local function fillFavoritesPanel(widget)
     if not widget.favoritesPanel then
-        widget.favoritesPanel = form.addExpansionPanel("Favorites")
-        widget.favoritesPanel:open(false)
+        return
     else 
         widget.favoritesPanel:clear()
     end
@@ -125,8 +124,7 @@ local function fillImagePanel(widget)
     local debug = useDebug.fillImagePanel
 
     if not widget.imagePanel then
-        widget.imagePanel = form.addExpansionPanel("Images")
-        widget.imagePanel:open(false)
+        return
     else
         widget.imagePanel:clear()
     end
@@ -142,8 +140,10 @@ local function fillImagePanel(widget)
         print("Debug(fillImagePanel):" .. "Default Image: " .. widget.Images.Default)
     end
 
+    print("hello")
     -- List out available Model IDs in the Favorites panel
     for i, modelId in ipairs(widget.modelIds) do
+        print("hello 2")
         local line = widget.imagePanel:addLine("ID " .. modelId .. " Image")
 
         local field = form.addFileField(line, nil, "/bitmaps/models", "image+ext", function()
@@ -151,10 +151,11 @@ local function fillImagePanel(widget)
         end, function(newValue)
             widget.Images[modelId] = newValue
         end)
-        if debug then
+        if debug and modelId and widget.Images[modelId] then
             print("Debug(fillImagePanel): Image for Model ID " .. modelId .. ": " .. widget.Images[modelId])
         end
     end
+    print("Finished filling image")
 end
 
 local function requestWidgetRebuild(widget)
@@ -186,8 +187,7 @@ local function fillBatteryPanel(widget)
     end
 
     if not widget.batteryPanel then
-        widget.batteryPanel = form.addExpansionPanel("Batteries")
-        widget.batteryPanel:open(false)
+       return
     else
         widget.batteryPanel:clear() 
     end
@@ -413,8 +413,7 @@ local function fillPrefsPanel(widget)
     end
 
     if not widget.prefsPanel then
-        widget.prefsPanel = form.addExpansionPanel("Preferences")
-        widget.prefsPanel:open(false)
+        return
     else 
         widget.prefsPanel:clear()
     end
@@ -746,7 +745,7 @@ local function build(widget)
 
         local batteryChoices = {}
         if #widget.matchingBatteries == 0 then
-            batteryChoices = {"No Connection", 0}
+            table.insert(batteryChoices, {"No Connection", 1})
         else
             for i, battery in ipairs(widget.matchingBatteries) do
                 table.insert(batteryChoices, {battery.name, battery.id})
@@ -878,24 +877,32 @@ local function configure(widget)
     if debug then
         print("Debug(configure): Filling Battery Panel")
     end
+    widget.batteryPanel = form.addExpansionPanel("Batteries")
+    widget.batteryPanel:open(false)
     fillBatteryPanel(widget)
 
     -- Fill Favorites panel
     if debug then
         print("Debug(configure): Filling Favorites Panel")
     end
+    widget.favoritesPanel = form.addExpansionPanel("Favorites")
+    widget.favoritesPanel:open(false)
     fillFavoritesPanel(widget)
 
     -- Fill Images panel
     if debug then
         print("Debug(configure): Filling Images Panel")
     end
+    widget.imagePanel = form.addExpansionPanel("Images")
+    widget.imagePanel:open(false)
     fillImagePanel(widget)
 
     -- Preferences Panel
     if debug then
         print("Debug(configure): Filling Preferences Panel")
     end
+    widget.prefsPanel = form.addExpansionPanel("Preferences")
+    widget.prefsPanel:open(false)
     fillPrefsPanel(widget)
 
     -- Alerts Panel.  Commented out for now as not in use
@@ -909,8 +916,7 @@ local function read(widget) -- Read configuration from storage
     print("Performing Read")
 
     local numBatts = storage.read("numBatts") or 0
-
-    widget.useCapacity = storage.read("useCapacity") or 80
+    print("Number of batteries during read: " .. numBatts)
     widget.Batteries = {}
     if numBatts > 0 then
         for i = 1, widget.numBatts do
@@ -925,6 +931,8 @@ local function read(widget) -- Read configuration from storage
     end
 
     populateModelIds(widget)
+
+    widget.useCapacity = storage.read("useCapacity") or 80
 
     widget.voltageCheckEnabled = storage.read("checkBatteryVoltageOnConnect") or false
     widget.voltageCheckMinChargedCellVoltage = storage.read("minChargedCellVoltage") or 415
@@ -942,8 +950,10 @@ local function read(widget) -- Read configuration from storage
 end
 
 local function write(widget) -- Write configuration to storage
+    print("Writing "..#widget.Batteries.." as number of batteries")
     storage.write("numBatts", #widget.Batteries)
     for i, battery in ipairs(widget.Batteries) do
+        print("Writing battery ".. i .. " to storage for battery name".. battery.name)
         storage.write("Battery" .. i .. "_name", battery.name)
         storage.write("Battery" .. i .. "_capacity", battery.capacity)
         storage.write("Battery" .. i .. "_modelID", battery.modelID)
@@ -951,8 +961,8 @@ local function write(widget) -- Write configuration to storage
     end
 
     storage.write("useCapacity", widget.useCapacity)
-    storage.write("checkBatteryVoltageOnConnect", widget.checkBatteryVoltageOnConnect)
-    storage.write("minChargedCellVoltage", widget.minChargedCellVoltage)
+    storage.write("checkBatteryVoltageOnConnect", widget.voltageCheckEnabled)
+    storage.write("minChargedCellVoltage", widget.voltageCheckMinChargedCellVoltage)
     storage.write("doHaptic", widget.doHaptic)
     storage.write("hapticPattern", widget.hapticPattern)
     storage.write("ImagesDefault", widget.Images.Default)
