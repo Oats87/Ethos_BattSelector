@@ -25,7 +25,7 @@ local radio = system.getVersion()
 local function create()
     local widget = {
         useCapacity = nil,
-        selectedBattery = nil,
+        selectedModelBattery = nil,
         doHaptic = nil,
         hapticPattern = nil,
 
@@ -40,7 +40,6 @@ local function create()
         currentModelID = nil,
 
         lastTime = os.clock(),
-        matchingBatteries = {},
 
         tlmActive = false,
 
@@ -170,11 +169,10 @@ local function resetBatteryVoltageCheck(widget, completed)
 end
 
 local function resetWidget(widget)
-    widget.selectedBattery = nil
+    widget.selectedModelBattery = nil
     widget.lastmAh = 0
     widget.lastModelID = nil
     widget.currentModelID = nil
-    widget.matchingBatteries = {}
 
     resetBatteryVoltageCheck(widget, false)
     requestWidgetRebuild(widget)
@@ -357,7 +355,7 @@ local function fillBatteryPanel(widget)
                 label = "Delete",
                 action = function()
                     table.remove(widget.Batteries, i)
-                    widget.numBatts = widget.numBatts - 1
+                    --widget.numBatts = widget.numBatts - 1
                     fillBatteryPanel(widget)
                     fillFavoritesPanel(widget)
                     requestWidgetRebuild(widget)
@@ -373,7 +371,7 @@ local function fillBatteryPanel(widget)
                         favorite = false
                     }
                     table.insert(widget.Batteries, newBattery)
-                    widget.numBatts = widget.numBatts + 1
+                    --widget.numBatts = widget.numBatts + 1
                     fillFavoritesPanel(widget)
                     fillImagePanel(widget)
                     requestWidgetRebuild(widget)
@@ -392,12 +390,12 @@ local function fillBatteryPanel(widget)
 
     local line = widget.batteryPanel:addLine("")
     local field = form.addTextButton(line, pos_add_button, "Add New", function()
-        widget.numBatts = widget.numBatts + 1
-        widget.Batteries[widget.numBatts] = {
-            name = "Battery " .. widget.numBatts,
+        table.insert(widget.Batteries, {
+            name = "Battery " .. #widget.Batteries+1,
             capacity = 0,
-            modelID = 0
-        }
+            modelID = 0,
+            favorite = false,
+        })
         fillBatteryPanel(widget)
         fillFavoritesPanel(widget)
         fillImagePanel(widget)
@@ -695,8 +693,6 @@ local function build(widget)
 
     local w, h = lcd.getWindowSize()
 
-    -- Refresh the matchingBatteries list based on currentModelID
-    widget.matchingBatteries = {}
     if widget.tlmActive then
         if widget.currentModelID then
             if debug then
@@ -704,35 +700,17 @@ local function build(widget)
             end
             for i, battery in ipairs(widget.Batteries) do
                 if battery.modelID == widget.currentModelID then
-                    table.insert(widget.matchingBatteries, battery)
-                    if battery.favorite then
-                        widget.selectedBattery = i
-                    end
+                    widget.selectedModelBattery = i
+                    -- if battery.favorite then
+                    --     widget.selectedModelBattery = i
+                    -- end
                 end
             end
-        else
-            widget.matchingBatteries = widget.Batteries
         end
     end
 
-    if not widget.selectedBattery then
-        widget.selectedBattery = 1
-    end
-
-    if debug then
-        local batteryNames = {}
-        for i, battery in ipairs(widget.matchingBatteries) do
-            table.insert(batteryNames, battery.name)
-        end
-        print("Debug(build): Matching Batteries: " .. table.concat(batteryNames, ", "))
-
-        if widget.Batteries[widget.selectedBattery] then
-            local batteryInfo = "Debug(build): Selected Battery: " .. widget.Batteries[widget.selectedBattery].name
-            if widget.Batteries[widget.selectedBattery].favorite then
-                batteryInfo = batteryInfo .. " (Favorite)"
-            end
-            print(batteryInfo)
-        end
+    if not widget.selectedModelBattery then
+        widget.selectedModelBattery = 1
     end
 
     if widget.fieldHeight and widget.fieldWidth then
@@ -744,10 +722,10 @@ local function build(widget)
         local pos_y = (h / 2 - widget.fieldHeight / 2)
 
         local batteryChoices = {}
-        if #widget.matchingBatteries == 0 then
+        if not widget.tlmActive then
             table.insert(batteryChoices, {"No Connection", 1})
         else
-            for i, battery in ipairs(widget.matchingBatteries) do
+            for i, battery in ipairs(widget.Batteries) do
                 table.insert(batteryChoices, {battery.name, battery.id})
             end
         end
@@ -759,9 +737,9 @@ local function build(widget)
             w = widget.fieldWidth,
             h = widget.fieldHeight
         }, batteryChoices, function()
-            return widget.selectedBattery
+            return widget.selectedModelBattery
         end, function(value)
-            widget.selectedBattery = value
+            widget.selectedModelBattery = value
         end)
     end
 end
@@ -786,9 +764,9 @@ local function wakeup(widget)
             local newmAh = getmAh(widget)
             local remainingPercentage = 100
 
-            if #widget.Batteries > 0 and widget.tlmActive and widget.selectedBattery and newmAh and widget.useCapacity then
+            if #widget.Batteries > 0 and widget.tlmActive and widget.selectedModelBattery and newmAh and widget.useCapacity then
                 if newmAh ~= widget.lastmAh then
-                    local usablemAh = widget.Batteries[widget.selectedBattery].capacity * (widget.useCapacity / 100)
+                    local usablemAh = widget.Batteries[widget.selectedModelBattery].capacity * (widget.useCapacity / 100)
                     remainingPercentage = 100 - (newmAh / usablemAh) * 100
                     if remainingPercentage < 0 then
                         remainingPercentage = 0
@@ -919,9 +897,8 @@ local function read(widget) -- Read configuration from storage
     print("Number of batteries during read: " .. numBatts)
     widget.Batteries = {}
     if numBatts > 0 then
-        for i = 1, widget.numBatts do
+        for i = 1, numBatts do
             widget.Batteries[i] = {
-                id = i,
                 name = storage.read("Battery" .. i .. "_name") or "Battery " .. i,
                 capacity = storage.read("Battery" .. i .. "_capacity") or 0,
                 modelID = storage.read("Battery" .. i .. "_modelID") or 0,
@@ -961,8 +938,10 @@ local function write(widget) -- Write configuration to storage
     end
 
     storage.write("useCapacity", widget.useCapacity)
+
     storage.write("checkBatteryVoltageOnConnect", widget.voltageCheckEnabled)
     storage.write("minChargedCellVoltage", widget.voltageCheckMinChargedCellVoltage)
+
     storage.write("doHaptic", widget.doHaptic)
     storage.write("hapticPattern", widget.hapticPattern)
     storage.write("ImagesDefault", widget.Images.Default)
