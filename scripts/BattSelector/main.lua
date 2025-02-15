@@ -1,11 +1,11 @@
 -- Ethos Battery Manager
-
-local HapticPatterns = { { ". . . . . .", 1 }, { ". - . - . - .", 2 }, { ". - - . - - . - - . - - .", 3 } }
+local HapticPatterns = {{". . . . . .", 1}, {". - . - . - .", 2}, {". - - . - - . - - . - - .", 3}}
 
 -- Get Radio Version to determine field size
 local radio = system.getVersion()
 
-local LIP = assert(loadfile("lib/lip.lua"))()
+-- local LIP = assert(loadfile("lib/lip.lua"))()
+local jsonFile = assert(loadfile("lib/json_file.lua"))()
 local fieldWidth
 local fieldHeight
 
@@ -17,21 +17,34 @@ local function create()
 
         -- Battery Handling
         batteries = {},
-        useCapacity = nil,
         lastObservedConsumption = 0,
         selectedModelBattery = nil,
 
-        -- Voltage Check
-        voltageCheckConfig = {
-            enabled = false,
-            minChargedCellVoltage = nil,
-            hapticEnabled = false,
-            hapticPattern = nil,
+        -- Configuration
+        config = {
+            useCapacity = nil,
+
+            voltageCheckEnabled = false,
+            voltageCheckMinChargedCellVoltage = nil,
+            voltageCheckHapticEnabled = false,
+            voltageCheckHapticPattern = nil,
+            remainingCalloutSwitch = nil,
+            remainingCalloutInterval = 10,
+            remainingCalloutZeroPercentInterval = 5,
+            remainingCalloutHapticEnabled = false,
+            remainingCalloutHapticPattern = nil,
+        },
+
+        modelStorage = {
+            pinnedModelId = nil,
         },
 
         voltageCheckCompleted = false,
+        voltageCheckPromptOpen = false, 
         voltageCheckLastCheckTime = nil,
         voltageCheckBatteryConnectTime = nil,
+
+        batteryChoiceFieldFocusOnBuild = false,
 
         -- Model IDs
         modelIds = {},
@@ -42,43 +55,61 @@ local function create()
         -- Widget Internals
         lastReconcileTime = os.clock(),
         telemetryActive = false,
+        telemetryActiveTime = nil,
 
         widgetRebuildRequired = false,
         widgetInitialized = false, -- Tracks whether the widget has been initalized.
 
         batteryPanel = nil,
-        prefsPanel = nil,
+        globalSettingsPanel = nil,
+        modelSettingsPanel = nil,
         preferencePanelRebuildRequired = false,
 
         mahSensor = nil,
         cellSensor = nil,
         voltageSensor = nil,
+
+        remainingCalloutSwitch = nil,
+
+        noBatteriesAlert = {
+            enabled = false,
+            lastPlayTime = nil,
+        },
+
+        batteryNeedsSelectionAlert = {
+            enabled = false,
+            lastPlayTime = nil,
+        },
+
+        remainingPercentageAlert = {
+            lastPlayedPercentage = nil,
+            lastCriticalPlayTime = nil,
+        }
     }
     return widget
 end
 
+local function readFromFiles(widget)
+    if os.stat("config.json") then
+        widget.config = jsonFile.load("config.json")
+    end
+    if os.stat("batteries.json") then
+        widget.batteries = jsonFile.load("batteries.json")
+    end
+end
 local function read(widget)
-    if os.stat("config.ini") then
-        local config = LIP.load("config.ini")
-        widget.voltageCheckConfig = config.voltageCheckConfig
-        widget.useCapacity = config.general.useCapacity
-    end
-    if os.stat("batteries.ini") then
-        widget.batteries = LIP.load("batteries.ini")
-        print("loaded batteries")
-    end
+    readFromFiles(widget)
+    widget.modelStorage.pinnedModelId = storage.read("m0") or 0
+end
+
+local function writeToFiles(widget)
+    jsonFile.save("config.json", widget.config)
+    jsonFile.save("batteries.json", widget.batteries)
 end
 
 local function write(widget)
-    LIP.save("config.ini", {
-        general = {
-            useCapacity = widget.useCapacity
-        },
-        voltageCheckConfig = {
-            widget.voltageCheckConfig
-        }
-    })
-    LIP.save("batteries.ini", widget.batteries)
+    writeToFiles(widget)
+    storage.write("m0", widget.modelStorage.pinnedModelId)
 end
 
 local function requestWidgetRebuild(widget)
@@ -90,15 +121,6 @@ local function resetBatteryVoltageCheck(widget, completed)
 
     widget.voltageCheckLastCheckTime = nil
     widget.voltageCheckBatteryConnectTime = nil
-end
-
-local function resetWidget(widget)
-    widget.selectedModelBattery = nil
-    widget.lastObservedConsumption = 0
-    widget.currentModelID = nil
-
-    resetBatteryVoltageCheck(widget, false)
-    requestWidgetRebuild(widget)
 end
 
 local function fillBatteryPanel(widget)
@@ -229,7 +251,7 @@ local function fillBatteryPanel(widget)
 
     form.addStaticText(line, pos_header_battery, "Name")
     form.addStaticText(line, pos_header_capacity, "Capacity")
-    form.addStaticText(line, pos_header_id, "ID")
+    form.addStaticText(line, pos_header_id, "mID")
 
     for i, battery in ipairs(widget.batteries) do
         line = widget.batteryPanel:addLine("")
@@ -238,7 +260,7 @@ local function fillBatteryPanel(widget)
             return battery.name
         end, function(newName)
             battery.name = newName
-            write(widget)
+            writeToFiles(widget)
             requestWidgetRebuild(widget)
         end)
 
@@ -246,7 +268,7 @@ local function fillBatteryPanel(widget)
             return battery.capacity
         end, function(value)
             battery.capacity = value
-            write(widget)
+            writeToFiles(widget)
             requestWidgetRebuild(widget)
         end)
         field:suffix("mAh")
@@ -258,7 +280,7 @@ local function fillBatteryPanel(widget)
             return battery.modelID
         end, function(value)
             battery.modelID = value
-            write(widget)
+            writeToFiles(widget)
             requestWidgetRebuild(widget)
         end)
 
@@ -266,7 +288,7 @@ local function fillBatteryPanel(widget)
         field:enableInstantChange(false)
 
         field = form.addTextButton(line, pos_options_button, "...", function()
-            local buttons = { {
+            local buttons = {{
                 label = "Cancel",
                 action = function()
                     return true
@@ -275,7 +297,7 @@ local function fillBatteryPanel(widget)
                 label = "Delete",
                 action = function()
                     table.remove(widget.batteries, i)
-                    write(widget)
+                    writeToFiles(widget)
                     fillBatteryPanel(widget)
                     requestWidgetRebuild(widget)
                     return true
@@ -289,11 +311,11 @@ local function fillBatteryPanel(widget)
                         modelID = battery.modelID
                     }
                     table.insert(widget.batteries, newBattery)
-                    write(widget)
+                    writeToFiles(widget)
                     requestWidgetRebuild(widget)
                     return true
                 end
-            } }
+            }}
             form.openDialog({
                 title = (battery.name ~= "" and battery.name or "Unnamed Battery"),
                 message = "Select Action",
@@ -309,82 +331,139 @@ local function fillBatteryPanel(widget)
         table.insert(widget.batteries, {
             name = "Battery " .. #widget.batteries + 1,
             capacity = 0,
-            modelID = 0,
+            modelID = 0
         })
-        write(widget)
+        writeToFiles(widget)
         fillBatteryPanel(widget)
         requestWidgetRebuild(widget)
     end)
 end
 
 -- Settings Panel
-local function fillPrefsPanel(widget)
-    if not widget.prefsPanel then
+local function fillModelSettingsPanel(widget)
+    if not widget.modelSettingsPanel then
         return
     else
-        widget.prefsPanel:clear()
+        widget.modelSettingsPanel:clear()
     end
 
-    local line = widget.prefsPanel:addLine("Use Capacity")
+        local line = widget.modelSettingsPanel:addLine("Override Model ID")
+        local field = form.addNumberField(line, nil, 0, 99, function()
+            return widget.modelStorage.pinnedModelId
+        end, function(value)
+            widget.modelStorage.pinnedModelId = value
+        end)
+        field:enableInstantChange(false)
+end
+
+-- Settings Panel
+local function fillGlobalSettingsPanel(widget)
+    if not widget.globalSettingsPanel then
+        return
+    else
+        widget.globalSettingsPanel:clear()
+    end
+
+    local line = widget.globalSettingsPanel:addLine("Use Capacity")
     local field = form.addNumberField(line, nil, 50, 100, function()
-        return widget.useCapacity
+        return widget.config.useCapacity
     end, function(value)
-        widget.useCapacity = value
+        widget.config.useCapacity = value
     end)
     field:suffix("%")
 
+    line = widget.globalSettingsPanel:addLine("Remaining Capacity Callout Enable")
+    field = form.addSwitchField(line, nil, 
+        function() 
+            return widget.remainingCalloutSwitch 
+        end, 
+        function(newValue) 
+            widget.remainingCalloutSwitch = newValue
+            if widget.remainingCalloutSwitch then 
+                widget.config.remainingCalloutSwitch  = 
+            {
+                name = newValue:name(),
+                member = newValue:member(),
+                category = newValue:category(),
+                physId = newValue:physId(),
+                appId = newValue:appId(),
+            }
+            else
+                widget.config.remainingCalloutSwitch = nil
+            end
+        end)
+
     -- Create field to enable/disable battery voltage checking on connect
-    line = widget.prefsPanel:addLine("Enable Voltage Check")
+    line = widget.globalSettingsPanel:addLine("Enable Voltage Check")
     field = form.addBooleanField(line, nil, function()
-        return widget.voltageCheckConfig.hapticEnabled
+        return widget.config.voltageCheckEnabled
     end, function(newValue)
-        widget.voltageCheckConfig.hapticEnabled = newValue
+        widget.config.voltageCheckEnabled = newValue
         widget.preferencePanelRebuildRequired = true
     end)
 
-    if widget.voltageCheckConfig.hapticEnabled then
-        line = widget.prefsPanel:addLine("Min Charged Volt/Cell")
+    if widget.config.voltageCheckEnabled then
+        line = widget.globalSettingsPanel:addLine("Min Charged Volt/Cell")
         field = form.addNumberField(line, nil, 400, 430, function()
-            return widget.voltageCheckConfig.minChargedCellVoltage
+            return widget.config.voltageCheckMinChargedCellVoltage
         end, function(value)
-            widget.voltageCheckConfig.minChargedCellVoltage = value
+            widget.config.voltageCheckMinChargedCellVoltage = value
         end)
         field:decimals(2)
         field:suffix("V")
         field:enableInstantChange(false)
 
-        line = widget.prefsPanel:addLine("Haptic Warning")
+        line = widget.globalSettingsPanel:addLine("Haptic Warning")
         form.addBooleanField(line, nil, function()
-            return widget.voltageCheckConfig.hapticEnabled
+            return widget.config.voltageCheckHapticEnabled
         end, function(newValue)
-            widget.voltageCheckConfig.hapticEnabled = newValue
+            widget.config.voltageCheckHapticEnabled = newValue
             widget.preferencePanelRebuildRequired = true
         end)
 
-        if widget.voltageCheckConfig.hapticEnabled then
-            line = widget.prefsPanel:addLine("Haptic Pattern")
+        if widget.config.voltageCheckHapticEnabled then
+            line = widget.globalSettingsPanel:addLine("Haptic Pattern")
             form.addChoiceField(line, nil, HapticPatterns, function()
-                return widget.voltageCheckConfig.hapticPattern
+                return widget.config.voltageCheckHapticPattern
             end, function(newValue)
-                widget.voltageCheckConfig.hapticPattern = newValue
+                widget.config.voltageCheckHapticPattern = newValue
             end)
         end
     end
 end
 
--- Alerts Panel, commented out for now as not in use
--- local function fillAlertsPanel(alertsPanel, widget)
---     local line = alertsPanel:addLine("Eventually")
--- end
+local function openBatteryVoltagePrompt(widget, title, message) 
+
+    widget.voltageCheckPromptOpen = true
+        local buttons = {{
+            label = "Acknowledge",
+            action = function()
+                widget.voltageCheckPromptOpen = false
+                return true
+            end
+        }}
+        system.playFile("sound/alert.wav")
+        if widget.config.voltageCheckHapticEnabled then
+            system.playHaptic(HapticPatterns[widget.config.voltageCheckHapticPattern][1])
+        end
+        form.openDialog({
+            title = title,
+            message = message,
+            width = 500,
+            buttons = buttons,
+            options = TEXT_LEFT
+        })
+    end
+
 
 -- Estimate cellcount and check if battery is charged.  If not, popup dialog to alert user
 local function doBatteryVoltageCheck(widget)
-    if not widget.telemetryActive then -- reset the voltage check if telemetry is not active or the voltage check is not enabled
+    if not widget.telemetryActive or not widget.selectedModelBattery then -- reset the voltage check if telemetry is not active or the voltage check is not enabled
         resetBatteryVoltageCheck(widget, false)
         return
     end
 
-    if widget.voltageCheckComplete or not widget.voltageCheckConfig.enabled then
+    if widget.voltageCheckCompleted or not widget.config.voltageCheckEnabled then
         resetBatteryVoltageCheck(widget, true)
         return
     end
@@ -398,12 +477,6 @@ local function doBatteryVoltageCheck(widget)
     end
 
     if (now - widget.voltageCheckBatteryConnectTime) < 3 then
-        resetBatteryVoltageCheck(widget, true)
-        return
-    end
-
-    if (now - widget.batteryConnectTime) > 30 then
-        resetBatteryVoltageCheck(widget, true)
         return
     end
 
@@ -414,13 +487,25 @@ local function doBatteryVoltageCheck(widget)
             name = "Voltage"
         })
         if not widget.voltageSensor then
-            return
+            widget.voltageSensor = system.getSource({
+                category = CATEGORY_TELEMETRY,
+                name = "Battery Voltage"
+            })
+            if not widget.voltageSensor then
+                openBatteryVoltagePrompt(widget, "Voltage Sensor Not Found", "Ensure there is a valid voltage sensor.")
+                resetBatteryVoltageCheck(widget, true)
+                return
+            end
         end
     end
 
     local currentVoltage = widget.voltageSensor:value()
 
     if not currentVoltage then
+        if now - widget.voltageCheckBatteryConnectTime > 5 then
+            openBatteryVoltagePrompt(widget, "Voltage Sensor Value Invalid", "Ensure there is a valid voltage sensor.")
+            resetBatteryVoltageCheck(widget, true)
+        end
         return -- not ready for voltage check, the voltage sensor value was nil
     end
 
@@ -436,11 +521,18 @@ local function doBatteryVoltageCheck(widget)
     local isCharged = false
 
     if widget.cellSensor then
+        if not widget.cellSensor:value() then
+            if now - widget.voltageCheckBatteryConnectTime > 5 then
+                openBatteryVoltagePrompt(widget, "Cell Count Sensor Value Invalid", "Ensure there is a valid cell count sensor.")
+                resetBatteryVoltageCheck(widget, true)
+            end
+            return
+        end
         cellCount = math.floor(widget.cellSensor:value())
-        isCharged = currentVoltage >= cellCount * widget.voltageCheckConfig.minChargedCellVoltage
+        isCharged = currentVoltage >= cellCount * widget.config.voltageCheckMinChargedCellVoltage
     else
         -- Estimate cell count based on voltage
-        cellCount = math.floor(currentVoltage / widget.voltageCheckConfig.minChargedCellVoltage + 0.5)
+        cellCount = math.floor(currentVoltage / (widget.config.voltageCheckMinChargedCellVoltage/100) + 0.5)
         -- To prevent accidentally reading a very low battery as a lower cell count than actual, add 1 to cellCount if the voltage is higher than cellCount * 4.35 (HV battery max cell voltage)
         if currentVoltage >= cellCount * 4.35 then
             cellCount = cellCount + 1
@@ -450,16 +542,21 @@ local function doBatteryVoltageCheck(widget)
             cellCount = 1
         end
 
-        isCharged = currentVoltage >= cellCount * widget.voltageCheckConfig.minChargedCellVoltage
+        isCharged = currentVoltage >= cellCount * widget.config.voltageCheckMinChargedCellVoltage
     end
 
     if not isCharged then
-        local buttons = { {
+        widget.voltageCheckPromptOpen = true
+        local buttons = {{
             label = "Acknowledge",
-            action = function() return true end
-        } }
-        if widget.voltageCheckConfig.hapticEnabled then
-            system.playHaptic(HapticPatterns[widget.voltageCheckConfig.hapticPattern][1])
+            action = function()
+                widget.voltageCheckPromptOpen = false
+                return true
+            end
+        }}
+        system.playFile("sound/alert.wav")
+        if widget.config.voltageCheckHapticEnabled then
+            system.playHaptic(HapticPatterns[widget.config.voltageCheckHapticPattern][1])
         end
         form.openDialog({
             title = "Low Battery Voltage",
@@ -493,6 +590,25 @@ local function updateRemainingPercentSensor(widget, newPercent)
     widget.remainingPercentSensor:value(newPercent)
 end
 
+local function resetWidget(widget)
+    widget.selectedModelBattery = nil
+    widget.lastObservedConsumption = 0
+    widget.lastReconcileTime = os.clock()
+    widget.currentModelID = nil
+    if widget.telemetryActiveTime then
+        system.playFile("sound/telemetry_lost.wav")
+    end
+    widget.telemetryActiveTime = nil
+
+    widget.remainingPercentageAlert.lastCriticalPlayTime = nil
+    widget.remainingPercentageAlert.lastPlayedPercentage = nil
+
+    widget.voltageCheckPromptOpen = false
+
+    resetBatteryVoltageCheck(widget, false)
+    requestWidgetRebuild(widget)
+end
+
 local function getCurrentConsumption(widget)
     if widget.mAhSensor == nil then
         for member = 0, 50 do
@@ -509,7 +625,6 @@ local function getCurrentConsumption(widget)
         end
 
         if not widget.mAhSensor then
-            print("No mAh sensor found!")
             return 0
         end
     end
@@ -525,57 +640,120 @@ end
 local function build(widget)
     -- Initialize widget based on radio type
     if not widget.widgetInitialized then
-        if not widget.useCapacity then widget.useCapacity = 70 end
-        if not widget.voltageCheckConfig.enabled then widget.voltageCheckConfig.enabled = false end
-        if not widget.voltageCheckConfig.minChargedCellVoltage then widget.voltageCheckConfig.minChargedCellVoltage = 415 end
-        if not widget.voltageCheckConfig.hapticEnabled then widget.voltageCheckConfig.hapticEnabled = false end
-        if not widget.voltageCheckConfig.hapticPattern then widget.voltageCheckConfig.hapticPattern = 1 end
-        form.create()
-        widget.widgetInitialized = true
-    end
-
-    if widget.telemetryActive then
-        if widget.currentModelID then
-            for i, battery in ipairs(widget.batteries) do
-                if battery.modelID == widget.currentModelID then
-                    widget.selectedModelBattery = i
-                end
-            end
+        if widget.config.remainingCalloutSwitch then
+                widget.remainingCalloutSwitch = system.getSource(widget.config.remainingCalloutSwitch)
         end
-    end
-
-    if not widget.selectedModelBattery then
-        widget.selectedModelBattery = 1
+        if not widget.config.useCapacity then
+            widget.config.useCapacity = 70
+        end
+        if not widget.config.voltageCheckEnabled then
+            widget.config.voltageCheckEnabled = false
+        end
+        if not widget.config.voltageCheckMinChargedCellVoltage then
+            widget.config.voltageCheckMinChargedCellVoltage = 415
+        end
+        if not widget.config.voltageCheckHapticEnabled then
+            widget.config.voltageCheckHapticEnabled = false
+        end
+        if not widget.config.voltageCheckHapticPattern then
+            widget.config.voltageCheckHapticPattern = 1
+        end
+        if not widget.config.remainingCalloutInterval then
+            widget.config.remainingCalloutInterval = 10
+        end
+        if not widget.config.remainingCalloutZeroPercentInterval then
+            widget.config.remainingCalloutZeroPercentInterval = 5
+        end
+        form.create()
+        if #widget.batteries == 0 then
+            form.clear()
+            local buttons = {{
+                label = "Acknowledge",
+                action = function()
+                    widget.noBatteriesAlert.lastPlayTime = nil
+                    widget.noBatteriesAlert.enabled = false
+                    return true
+                end
+            }}
+            -- local noBatteriesAlertSoundTime = os.clock()
+            if not widget.noBatteriesAlert.lastPlayTime then
+                system.playFile("sound/alert.wav")
+                widget.noBatteriesAlert.enabled = true
+                widget.noBatteriesAlert.lastPlayTime = os.clock()
+            end
+            local dialog = form.openDialog({
+                title = "No Batteries Found!",
+                message = "No batteries were found for the widget. Please add at least one battery!",
+                width = 500,
+                buttons = buttons,
+                options = TEXT_LEFT,
+                wakeup = function()
+                    local now = os.clock()
+                    if widget.noBatteriesAlert.enabled and (now - widget.noBatteriesAlert.lastPlayTime) > 5 then
+                        system.playFile("sound/alert.wav")
+                        widget.noBatteriesAlert.lastPlayTime = now
+                    end
+                end
+            })
+        end
+        widget.widgetInitialized = true
     end
 
     if fieldHeight and fieldWidth then
         form.clear()
 
-        local batteryChoices = {}
-        if not widget.telemetryActive then
-            table.insert(batteryChoices, { "No Connection", 1 })
-        else
-            for i, battery in ipairs(widget.batteries) do
-                table.insert(batteryChoices, { battery.name, i })
-            end
-        end
-
         local w, h = lcd.getWindowSize()
-        -- Create form and add choice field for selecting battery
-        form.addChoiceField(nil, {
-            x = (w / 2 - fieldWidth / 2),
-            y = (h / 2 - fieldHeight / 2),
-            w = fieldWidth,
-            h = fieldHeight
-        }, batteryChoices, function()
-            return widget.selectedModelBattery
-        end, function(value)
-            widget.selectedModelBattery = value
-        end)
+        if widget.telemetryActive then
+            if widget.currentModelID then
+                for i, battery in ipairs(widget.batteries) do
+                    if battery.modelID == widget.currentModelID then
+                        widget.selectedModelBattery = i
+                        system.playFile("sound/batt_auto_selected.wav")
+                    end
+                end
+            end
+            local batteryChoices = {}
+            for i, battery in ipairs(widget.batteries) do
+                table.insert(batteryChoices, {battery.name, i})
+            end
+            -- Create form and add choice field for selecting battery
+             local batteryChoiceField = form.addChoiceField(nil, {
+                x = (w / 2 - fieldWidth / 2),
+                y = (h / 2 - fieldHeight / 2),
+                w = fieldWidth,
+                h = fieldHeight
+            }, batteryChoices, function()
+                return widget.selectedModelBattery
+            end, function(value)
+                widget.selectedModelBattery = value
+                widget.batteryNeedsSelectionAlert.enabled = false
+                widget.batteryNeedsSelectionAlert.lastPlayTime = nil
+                widget.batteryChoiceFieldFocusOnBuild = false
+            end)
+
+            if not widget.selectedModelBattery and widget.batteryChoiceFieldFocusOnBuild then
+                batteryChoiceField:focus()
+                widget.batteryNeedsSelectionAlert.enabled = true
+            end
+        else
+            local msg = "Waiting for Telemetry"
+            local textW, textH = lcd.getTextSize(msg)
+
+            form.addStaticText(nil, {
+                x = (w / 2 - textW / 2),
+                y = (h / 2 - textH / 2),
+                w = textW,
+                h = textW
+            }, msg)
+        end
     end
 end
 
 local function reconcileCurrentModelId(widget)
+    if widget.modelStorage.pinnedModelId and widget.modelStorage.pinnedModelId ~= 0 then
+        widget.currentModelID = widget.modelStorage.pinnedModelId
+    else 
+
     -- Check for modelID sensor presence and its value
     if widget.modelIDSensor == nil then
         widget.modelIDSensor = system.getSource({
@@ -590,7 +768,7 @@ local function reconcileCurrentModelId(widget)
             widget.currentModelID = math.floor(widget.modelIDSensor:value())
         end
     end
-
+end 
     -- Check if the modelID has changed since last wakeup, and if so, set the rebuildMatching flag to true
     if widget.currentModelID ~= widget.lastModelID then
         widget.lastModelID = widget.currentModelID
@@ -601,23 +779,63 @@ end
 local function reconcileConsumption(widget)
     -- if batteries exist, telemetry is active, a battery is selected, and the mAh reading is not nil, do the maths
     local currentConsumption = getCurrentConsumption(widget)
-    local remainingPercentage = 100
-
-    if #widget.batteries > 0 and widget.selectedModelBattery and currentConsumption and widget.useCapacity then
-        if currentConsumption ~= widget.lastObservedConsumption then
-            local usablemAh = widget.batteries[widget.selectedModelBattery].capacity * (widget.useCapacity / 100)
-            remainingPercentage = 100 - (currentConsumption / usablemAh) * 100
+    if #widget.batteries > 0 and widget.selectedModelBattery and currentConsumption and widget.config.useCapacity then
+        if currentConsumption >= widget.lastObservedConsumption then
+            local usablemAh = widget.batteries[widget.selectedModelBattery].capacity * (widget.config.useCapacity / 100)
+            local remainingPercentage = 100 - (currentConsumption / usablemAh) * 100
             if remainingPercentage < 0 then
                 remainingPercentage = 0
             end
+            updateRemainingPercentSensor(widget, remainingPercentage) -- Update the remaining sensor
             widget.lastObservedConsumption = currentConsumption
+
+            if widget.remainingCalloutSwitch and widget.remainingCalloutSwitch:state() then
+                if remainingPercentage == 0 or 
+                remainingPercentage % 10 == 0 or 
+                (widget.remainingPercentageAlert.lastPlayedPercentage and 
+                (widget.remainingPercentageAlert.lastPlayedPercentage - remainingPercentage 
+                > widget.config.remainingCalloutInterval)) then
+                    local roundedPercent = math.ceil(remainingPercentage / 10) * 10
+
+                    local playRequired = remainingPercentage ~= 0 and widget.remainingPercentageAlert.lastPlayedPercentage ~= roundedPercent
+                    if remainingPercentage == 0 then
+                        if widget.remainingPercentageAlert.lastCriticalPlayTime then
+                        end
+                        local now = os.clock()
+                        if (widget.remainingPercentageAlert.lastCriticalPlayTime and now - widget.remainingPercentageAlert.lastCriticalPlayTime > widget.config.remainingCalloutZeroPercentInterval) or not widget.remainingPercentageAlert.lastCriticalPlayTime then
+                            playRequired = true
+                            widget.remainingPercentageAlert.lastCriticalPlayTime = now
+                        end
+                    end
+                    
+                    if playRequired then
+                        widget.remainingPercentageAlert.lastPlayedPercentage = roundedPercent
+                        system.playFile("sound/battery.wav")
+                        system.playNumber(roundedPercent, UNIT_PERCENT, 0)
+
+                        if remainingPercentage == 0 and widget.config.remainingCalloutHapticEnabled and widget.config.remainingCalloutHapticPattern then
+                            system.playHaptic(HapticPatterns[widget.config.remainingCalloutHapticPattern][1])
+                        end
+                    end
+                end
+             else 
+                 widget.remainingPercentageAlert.lastPlayedPercentage = nil
+             end
+
         end
+     
     end
-    updateRemainingPercentSensor(widget, remainingPercentage) -- Update the remaining sensor
 end
 
 local function wakeup(widget)
     local now = os.clock()
+    if widget.batteryNeedsSelectionAlert.enabled and not widget.selectedModelBattery then
+        if (widget.batteryNeedsSelectionAlert.lastPlayTime and now - widget.batteryNeedsSelectionAlert.lastPlayTime > 5) or not widget.batteryNeedsSelectionAlert.lastPlayTime then
+        system.playFile("sound/batt_needs_selection.wav")
+        widget.batteryNeedsSelectionAlert.lastPlayTime = now
+        end
+    end
+
     local timeSinceLastReconcile = now - widget.lastReconcileTime
 
     if timeSinceLastReconcile >= 1 then
@@ -628,12 +846,22 @@ local function wakeup(widget)
         }):state()
 
         if widget.telemetryActive then
-            doBatteryVoltageCheck(widget)
-            reconcileConsumption(widget)
+            if not widget.telemetryActiveTime then
+                widget.telemetryActiveTime = now
+                widget.batteryChoiceFieldFocusOnBuild = true
+                
+                requestWidgetRebuild(widget)
+                system.playFile("sound/telemetry_active.wav")
+            end
+            if widget.selectedModelBattery then
+                doBatteryVoltageCheck(widget)
+                if widget.config.voltageCheckEnabled and not widget.voltageCheckPromptOpen and widget.voltageCheckCompleted or not widget.config.voltageCheckEnabled then
+                    reconcileConsumption(widget)
+                end
+            end
             reconcileCurrentModelId(widget)
-
             widget.lastReconcileTime = now
-        elseif timeSinceLastReconcile >= 5 then
+        elseif not widget.telemetryActive and timeSinceLastReconcile >= 5 then
             resetWidget(widget)
         end
     end
@@ -644,31 +872,31 @@ local function wakeup(widget)
     end
 
     if widget.preferencePanelRebuildRequired then
-        fillPrefsPanel(widget)
+        fillGlobalSettingsPanel(widget)
         widget.preferencePanelRebuildRequired = false
     end
 end
 
 -- This function is called when the user first selects the widget from the widget list, or when they select "configure widget"
 local function configure(widget)
-    read(widget)
     widget.batteryPanel = form.addExpansionPanel("Batteries")
-    widget.batteryPanel:open(false)
     fillBatteryPanel(widget)
 
-    widget.prefsPanel = form.addExpansionPanel("Preferences")
-    widget.prefsPanel:open(false)
-    fillPrefsPanel(widget)
+    widget.modelSettingsPanel = form.addExpansionPanel("Model Settings")
+    fillModelSettingsPanel(widget)
+
+    widget.globalSettingsPanel = form.addExpansionPanel("Global Settings")
+    fillGlobalSettingsPanel(widget)
 end
 
-
-local function paint(widget) end
+local function paint(widget)
+end
 
 local function init()
     -- Set form size based on radio type
     if string.find(radio.board, "X20") or radio.board == "X18R" or radio.board == "X18RS" then
         fieldHeight = 40
-        fieldWidth = 145
+        fieldWidth = 155
     elseif radio.board == "X18" or radio.board == "X18S" or radio.board == "TWXLITE" or radio.board == "TWXLITES" then
         fieldHeight = 30
         fieldWidth = 100
